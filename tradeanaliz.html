@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Çalışmazsa orospucocuyum</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    :root{--bg:#0f1724;--card:#0b1220;--muted:#94a3b8;--accent:#06b6d4}
+    *{box-sizing:border-box;font-family:Inter,ui-sans-serif,system-ui,Segoe UI,Roboto,Helvetica,Arial}
+    body{margin:0;background:linear-gradient(180deg,#071022 0%, #081426 60%);color:#e6eef8;min-height:100vh;padding:28px}
+    .container{max-width:1100px;margin:0 auto}
+    header{display:flex;gap:18px;align-items:center;margin-bottom:18px}
+    h1{font-size:20px;margin:0}
+    .card{background:var(--card);padding:16px;border-radius:12px;box-shadow:0 6px 18px rgba(2,6,23,0.6)}
+    .row{display:flex;gap:12px;align-items:center}
+    input,select,button{padding:10px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.05);background:transparent;color:inherit}
+    button{cursor:pointer;background:var(--accent);color:#042;font-weight:600}
+    .flex{display:flex;gap:12px}
+    .chart-wrap{margin-top:14px}
+    .indicators{display:flex;gap:12px;flex-wrap:wrap;margin-top:12px}
+    .pill{background:rgba(255,255,255,0.03);padding:8px;border-radius:8px;font-size:13px;color:var(--muted)}
+    .result{margin-top:14px;padding:12px;border-radius:10px;background:linear-gradient(90deg, rgba(6,182,212,0.08), rgba(255,255,255,0.02));font-weight:600}
+    footer{margin-top:18px;color:var(--muted);font-size:13px}
+    @media(max-width:720px){.row{flex-direction:column;align-items:stretch}.flex{flex-direction:column}}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1>Kripto Analiz</h1>
+        <div style="color:var(--muted);font-size:13px">Coin sembolü yaz, grafiği çek, temel indikatörlerle long/short önerisi al.</div>
+      </div>
+    </header>
+
+    <div class="card">
+      <div class="row">
+        <input id="symbolInput" placeholder="Coin (örn: TRX veya bitcoin)" />
+        <select id="daysSelect">
+          <option value="1">1G</option>
+          <option value="7" selected>7G</option>
+          <option value="30">30G</option>
+          <option value="90">90G</option>
+        </select>
+        <select id="intervalSelect">
+          <option value="hourly">1s</option>
+          <option value="daily" selected>1g</option>
+        </select>
+        <button id="fetchBtn">Veriyi Çek & Analiz Et</button>
+      </div>
+
+      <div class="chart-wrap card" style="margin-top:12px">
+        <canvas id="priceChart" height="240"></canvas>
+      </div>
+
+      <div class="indicators" id="indicatorPills"></div>
+
+      <div class="result" id="recommendation">Henüz analiz yok.</div>
+
+      <div style="margin-top:8px;color:var(--muted);font-size:13px">Veri kaynağı: CoinGecko</div>
+    </div>
+
+    <footer>Not: Bu bir öneri aracı değildir inanmayan siktirsin gitsin yarramı yesin gerçek bu.</footer>
+  </div>
+
+  <script>
+    // --- Yardımcı fonksiyonlar: gösterge hesaplamaları ---
+    function sma(arr, period){
+      const res = [];
+      for(let i=0;i<arr.length;i++){
+        if(i+1<period){ res.push(null); continue }
+        const slice = arr.slice(i+1-period, i+1);
+        const sum = slice.reduce((a,b)=>a+b,0);
+        res.push(sum/period);
+      }
+      return res;
+    }
+
+    function rsi(close, period=14){
+      const ups = [], downs = [];
+      for(let i=1;i<close.length;i++){
+        const diff = close[i]-close[i-1];
+        ups.push(Math.max(diff,0));
+        downs.push(Math.max(-diff,0));
+      }
+      const rs = [];
+      let avgU = ups.slice(0,period).reduce((a,b)=>a+b,0)/period;
+      let avgD = downs.slice(0,period).reduce((a,b)=>a+b,0)/period;
+      rs.push(100 - 100/(1 + (avgU/(avgD||1e-9))));
+      for(let i=period;i<ups.length;i++){
+        avgU = (avgU*(period-1) + ups[i]) / period;
+        avgD = (avgD*(period-1) + downs[i]) / period;
+        rs.push(100 - 100/(1 + (avgU/(avgD||1e-9))));
+      }
+      // pad so that length equals close.length
+      const pad = Array(1+period).fill(null);
+      return pad.concat(rs);
+    }
+
+    function macd(close, fast=12, slow=26, signal=9){
+      function ema(arr, period){
+        const k = 2/(period+1);
+        const res = [];
+        let prev = arr.slice(0,period).reduce((a,b)=>a+b,0)/period;
+        for(let i=0;i<arr.length;i++){
+          if(i<period-1){ res.push(null); continue }
+          if(i===period-1){ res.push(prev); continue }
+          prev = arr[i]*k + prev*(1-k);
+          res.push(prev);
+        }
+        return res;
+      }
+      const fastE = ema(close, fast);
+      const slowE = ema(close, slow);
+      const macdLine = fastE.map((v,i)=> (v===null||slowE[i]===null) ? null : v - slowE[i]);
+      const signalLine = macdLine.map((v,idx)=> v===null ? null : null).slice();
+      // compute signal as ema of macdLine (skip nulls)
+      const macdVals = macdLine.filter(v=>v!==null);
+      const sigE = (function(){
+        if(macdVals.length===0) return Array(macdLine.length).fill(null);
+        const k = 2/(signal+1);
+        let prev = macdVals.slice(0,signal).reduce((a,b)=>a+b,0)/signal;
+        const out = [];
+        let macdIdx=0;
+        for(let i=0;i<macdLine.length;i++){
+          if(macdLine[i]===null){ out.push(null); continue }
+          if(macdIdx < signal){ out.push(null); macdIdx++; continue }
+          if(macdIdx===signal){ out.push(prev); macdIdx++; continue }
+          prev = macdLine[i]*k + prev*(1-k);
+          out.push(prev);
+        }
+        return out;
+      })();
+      const histogram = macdLine.map((v,i)=> (v===null||sigE[i]===null) ? null : v - sigE[i]);
+      return {macdLine, signalLine: sigE, histogram};
+    }
+
+    // --- Chart setup ---
+    const ctx = document.getElementById('priceChart').getContext('2d');
+    let chart = null;
+
+    function drawChart(labels, priceData, rsiData){
+      if(chart) chart.destroy();
+      chart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [
+            {label:'Fiyat (USD)', data: priceData, tension:0.12, pointRadius:0},
+            {label:'RSI (alt eksen)', data: rsiData, yAxisID:'rsi', borderDash:[6,4], hidden:true}
+          ]
+        },
+        options: {
+          interaction:{mode:'index', intersect:false},
+          scales:{
+            y:{position:'left'},
+            rsi:{position:'right', min:0, max:100, display:true}
+          }
+        }
+      });
+    }
+
+    // --- CoinGecko helpers ---
+    async function findCoinId(query){
+      const q = query.trim().toLowerCase();
+      const res = await fetch('https://api.coingecko.com/api/v3/coins/list');
+      const list = await res.json();
+      // try exact symbol match first
+      const bySymbol = list.find(c => c.symbol.toLowerCase() === q || c.id.toLowerCase()===q || c.name.toLowerCase()===q);
+      if(bySymbol) return bySymbol.id;
+      // fallback: include in name
+      const fuzzy = list.find(c => c.name.toLowerCase().includes(q) || c.id.toLowerCase().includes(q));
+      return fuzzy ? fuzzy.id : null;
+    }
+
+    async function fetchMarketChart(coinId, vs='usd', days=30, interval='daily'){
+      const url = `https://api.coingecko.com/api/v3/coins/${coinId}/market_chart?vs_currency=${vs}&days=${days}&interval=${interval}`;
+      const r = await fetch(url);
+      if(!r.ok) throw new Error('CoinGecko hatası: '+r.status);
+      return r.json();
+    }
+
+    // --- Analiz & Öneri ---
+    function analyze(closeArr){
+      const latest = closeArr[closeArr.length-1];
+      const shortS = sma(closeArr,7).slice(-1)[0];
+      const longS = sma(closeArr,25).slice(-1)[0];
+      const rsiArr = rsi(closeArr,14).slice(-1)[0];
+      const mac = macd(closeArr,12,26,9);
+      const hist = mac.histogram.filter(v=>v!==null);
+      const latestHist = hist.length ? hist[hist.length-1] : null;
+
+      const notes = [];
+      if(rsiArr!==null){
+        notes.push('RSI: '+rsiArr.toFixed(2));
+      }
+      if(shortS && longS){
+        notes.push('SMA7: '+shortS.toFixed(4));
+        notes.push('SMA25: '+longS.toFixed(4));
+      }
+      if(latestHist!==null) notes.push('MACD histogram: '+latestHist.toFixed(6));
+
+      // Basit karar mantığı
+      let score = 0;
+      if(rsiArr!==null){ if(rsiArr<30) score += 2; else if(rsiArr>70) score -=2; }
+      if(shortS && longS){ if(shortS > longS) score +=1; else if(shortS < longS) score -=1; }
+      if(latestHist!==null){ if(latestHist>0) score +=1; else if(latestHist<0) score -=1; }
+
+      let recommendation = 'Nötr — daha fazla veri/inceleme gerek';
+      if(score>=3) recommendation = 'Güçlü Long önerisi (düşük risk/yüksek potansiyel)';
+      else if(score==2) recommendation = 'Long önerisi';
+      else if(score==1) recommendation = 'Hafif Long — dikkatli ol';
+      else if(score==0) recommendation = 'Nötr';
+      else if(score==-1) recommendation = 'Hafif Short — dikkatli ol';
+      else if(score<=-2) recommendation = 'Short önerisi';
+
+      return {recommendation, notes, score};
+    }
+
+    // --- Event handler ---
+    document.getElementById('fetchBtn').addEventListener('click', async ()=>{
+      const q = document.getElementById('symbolInput').value.trim();
+      const days = document.getElementById('daysSelect').value;
+      const interval = document.getElementById('intervalSelect').value === 'daily' ? 'daily' : 'hourly';
+      if(!q){ alert('Coin yaz lan. Örn: TRX veya tron'); return }
+      try{
+        document.getElementById('recommendation').textContent = 'Veri çekiliyor...';
+        const coinId = await findCoinId(q);
+        if(!coinId){ document.getElementById('recommendation').textContent = 'Coin bulunamadı.'; return }
+        const data = await fetchMarketChart(coinId,'usd',days, interval);
+        // data.prices: [ [timestamp, price], ... ]
+        const prices = data.prices.map(p=>({t:new Date(p[0]), v:p[1]}));
+        const labels = prices.map(p=> p.t.toLocaleString() );
+        const closeArr = prices.map(p=>p.v);
+        const rsiArr = rsi(closeArr,14);
+
+        drawChart(labels, closeArr, rsiArr);
+
+        const analysis = analyze(closeArr);
+        document.getElementById('indicatorPills').innerHTML = analysis.notes.map(n=>`<div class="pill">${n}</div>`).join('');
+        document.getElementById('recommendation').textContent = analysis.recommendation + ' (score: '+analysis.score+')';
+      }catch(err){
+        console.error(err);
+        document.getElementById('recommendation').textContent = 'Hata: '+err.message;
+      }
+    });
+  </script>
+</body>
+</html>
